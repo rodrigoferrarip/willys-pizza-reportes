@@ -2,8 +2,7 @@ import io
 import os
 import csv
 import json
-import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from openai import OpenAI
@@ -47,7 +46,7 @@ def parse_csv(file_stream):
         fecha = datetime.strptime(raw["created_at_gmt3"].strip(), "%B %d, %Y, %I:%M %p")
         rows.append({
             "fecha": fecha,
-            "mes_label": fecha.strftime("%b %Y"),
+            "dia_label": fecha.strftime("%d %b %Y"),
             "order_count": int(float(raw["order_count"])),
             "total_amount": _to_float(raw["total_amount"]),
             "amount_growth_percent": _to_float(raw.get("amount_growth_percent")),
@@ -58,57 +57,80 @@ def parse_csv(file_stream):
     return rows
 
 
-def compute_stats(rows):
+def filter_period(rows, start, end):
+    return [r for r in rows if start <= r["fecha"] <= end]
+
+
+def default_comparison_period(start, end):
+    duracion = end - start
+    comp_end = start - timedelta(days=1)
+    comp_start = comp_end - duracion
+    return comp_start, comp_end
+
+
+def compute_period_stats(rows):
+    if not rows:
+        return None
     best = max(rows, key=lambda r: r["total_amount"])
     worst = min(rows, key=lambda r: r["total_amount"])
     total_monto = sum(r["total_amount"] for r in rows)
     total_pedidos = sum(r["order_count"] for r in rows)
     n = len(rows)
-
     return {
-        "periodo_inicio": rows[0]["mes_label"],
-        "periodo_fin": rows[-1]["mes_label"],
+        "desde": rows[0]["dia_label"],
+        "hasta": rows[-1]["dia_label"],
+        "dias_con_ventas": n,
         "total_pedidos": total_pedidos,
-        "total_monto": total_monto,
-        "promedio_monto": total_monto / n,
-        "promedio_pedidos": total_pedidos / n,
-        "mejor_mes": best["mes_label"],
-        "mejor_mes_monto": best["total_amount"],
-        "peor_mes": worst["mes_label"],
-        "peor_mes_monto": worst["total_amount"],
-        "ultimo_mes": rows[-1]["mes_label"],
-        "ultimo_mes_monto": rows[-1]["total_amount"],
-        "ultimo_crecimiento": rows[-1]["amount_growth_percent"],
+        "total_monto": round(total_monto, 2),
+        "promedio_diario_monto": round(total_monto / n, 2),
+        "promedio_diario_pedidos": round(total_pedidos / n, 2),
+        "mejor_dia": best["dia_label"],
+        "mejor_dia_monto": best["total_amount"],
+        "peor_dia": worst["dia_label"],
+        "peor_dia_monto": worst["total_amount"],
     }
 
 
-def call_llm(rows, stats):
-    lineas = ["mes | pedidos | monto_total | crecimiento_monto% | crecimiento_pedidos%"]
-    for r in rows:
-        lineas.append(
-            f"{r['mes_label']} | {r['order_count']} | {r['total_amount']:.2f} | "
-            f"{r['amount_growth_percent'] if r['amount_growth_percent'] is not None else 'N/A'} | "
-            f"{r['order_count_growth_percent'] if r['order_count_growth_percent'] is not None else 'N/A'}"
-        )
-    tabla = "\n".join(lineas)
+def compute_comparison(stats_a, stats_b):
+    if not stats_b or stats_b["total_monto"] == 0:
+        return {"crecimiento_monto": None, "crecimiento_pedidos": None}
+    crecimiento_monto = (stats_a["total_monto"] - stats_b["total_monto"]) / stats_b["total_monto"] * 100
+    crecimiento_pedidos = (stats_a["total_pedidos"] - stats_b["total_pedidos"]) / stats_b["total_pedidos"] * 100
+    return {
+        "crecimiento_monto": round(crecimiento_monto, 1),
+        "crecimiento_pedidos": round(crecimiento_pedidos, 1),
+    }
 
-    prompt = f"""Eres un analista financiero experto en negocios gastronomicos. A continuacion te paso los datos de ventas mensuales de "Willy's Pizza", una pizzeria, extraidos de su plataforma de pedidos online.
 
-Datos:
-{tabla}
+def call_llm(rows_a, stats_a, label_a, rows_b, stats_b, label_b, comparacion):
+    tabla_a = "\n".join(
+        f"{r['dia_label']} | pedidos={r['order_count']} | monto={r['total_amount']:.2f}" for r in rows_a
+    )
 
-Estadisticas ya calculadas para que las uses como referencia:
-{json.dumps(stats, ensure_ascii=False, indent=2)}
+    prompt = f"""Eres un analista financiero experto en negocios gastronomicos. Willy's Pizza es una pizzeria que vende online. Te paso datos de ventas DIARIAS de dos periodos para que los compares.
 
-Con estos datos, redacta un reporte ejecutivo en espanol, claro y directo, con EXACTAMENTE estas secciones (usa estos titulos tal cual, precedidos por ##):
+PERIODO A ANALIZAR ({label_a}):
+{tabla_a}
+
+Estadisticas del Periodo A:
+{json.dumps(stats_a, ensure_ascii=False, indent=2)}
+
+PERIODO DE COMPARACION ({label_b}):
+Estadisticas del Periodo B:
+{json.dumps(stats_b, ensure_ascii=False, indent=2)}
+
+Comparacion calculada (Periodo A vs Periodo B):
+{json.dumps(comparacion, ensure_ascii=False, indent=2)}
+
+Redacta un reporte ejecutivo en espanol, claro y directo, enfocado en el Periodo A y usando el Periodo B como referencia de comparacion. Usa EXACTAMENTE estas secciones, con estos titulos precedidos por ##:
 
 ## Resumen del periodo
-## Analisis de tendencia
-## Mejor y peor mes
-## Promedio mensual
+## Comparacion contra el periodo anterior
+## Mejor y peor dia
+## Tendencia dentro del periodo
 ## Recomendacion
 
-Tono profesional pero cercano, sin tecnicismos innecesarios. No uses tablas markdown, solo texto corrido bajo cada titulo. No repitas los titulos de seccion dentro del texto."""
+Tono profesional pero cercano, sin tecnicismos innecesarios. No uses tablas markdown, solo texto corrido bajo cada titulo. No repitas los titulos de seccion dentro del texto. Se especifico citando los numeros relevantes."""
 
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -118,33 +140,22 @@ Tono profesional pero cercano, sin tecnicismos innecesarios. No uses tablas mark
     return response.choices[0].message.content
 
 
-def fetch_banner_image():
-    prompt = (
-        "Minimalist flat design illustration of a pizza, black and yellow color "
-        "palette, clean background, modern branding style for a pizzeria called "
-        "Willy's Pizza, no text, horizontal banner format"
-    )
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
-    url += "?width=1024&height=400&nologo=true&seed=42"
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    return io.BytesIO(resp.content)
-
-
-def fetch_chart_image(rows):
-    last6 = rows[-6:]
-    labels = [r["mes_label"] for r in last6]
-    data = [round(r["total_amount"], 2) for r in last6]
+def fetch_trend_chart(rows_a, label_a):
+    labels = [r["dia_label"] for r in rows_a]
+    data = [round(r["total_amount"], 2) for r in rows_a]
     chart_config = {
-        "type": "bar",
+        "type": "line",
         "data": {
             "labels": labels,
             "datasets": [{
-                "label": "Ventas (UYU)",
+                "label": f"Ventas diarias - {label_a}",
                 "data": data,
-                "backgroundColor": "#FFC700",
+                "backgroundColor": "rgba(255,199,0,0.3)",
                 "borderColor": "#000000",
                 "borderWidth": 2,
+                "fill": True,
+                "pointBackgroundColor": "#FFC700",
+                "pointBorderColor": "#000000",
             }],
         },
         "options": {
@@ -155,8 +166,52 @@ def fetch_chart_image(rows):
             },
         },
     }
+    return _quickchart(chart_config)
+
+
+def fetch_comparison_chart(stats_a, label_a, stats_b, label_b):
+    chart_config = {
+        "type": "bar",
+        "data": {
+            "labels": [label_a, label_b],
+            "datasets": [
+                {
+                    "label": "Monto total (UYU)",
+                    "data": [stats_a["total_monto"], stats_b["total_monto"]],
+                    "backgroundColor": "#FFC700",
+                    "borderColor": "#000000",
+                    "borderWidth": 2,
+                    "yAxisID": "y",
+                },
+                {
+                    "label": "Pedidos totales",
+                    "data": [stats_a["total_pedidos"], stats_b["total_pedidos"]],
+                    "backgroundColor": "#000000",
+                    "borderColor": "#FFC700",
+                    "borderWidth": 2,
+                    "yAxisID": "y1",
+                },
+            ],
+        },
+        "options": {
+            "plugins": {"legend": {"labels": {"color": "#000000"}}},
+            "scales": {
+                "x": {"ticks": {"color": "#000000"}},
+                "y": {"type": "linear", "position": "left", "ticks": {"color": "#000000"}},
+                "y1": {"type": "linear", "position": "right", "ticks": {"color": "#000000"}, "grid": {"drawOnChartArea": False}},
+            },
+        },
+    }
+    return _quickchart(chart_config)
+
+
+def _quickchart(chart_config):
     url = "https://quickchart.io/chart"
-    resp = requests.post(url, json={"chart": chart_config, "width": 600, "height": 350, "backgroundColor": "white"}, timeout=60)
+    resp = requests.post(
+        url,
+        json={"chart": chart_config, "width": 700, "height": 380, "backgroundColor": "white"},
+        timeout=60,
+    )
     resp.raise_for_status()
     return io.BytesIO(resp.content)
 
@@ -178,24 +233,22 @@ def parse_sections(report_text):
     return sections
 
 
-def build_pdf(rows, stats, report_text, banner_img, chart_img):
+def build_pdf(rows_a, stats_a, label_a, stats_b, label_b, report_text, trend_img, comparison_img):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle("TitleY", parent=styles["Title"], textColor=AMARILLO, backColor=NEGRO,
-                                  alignment=1, spaceAfter=0, leading=28, fontSize=22, leftIndent=0)
+                                  alignment=1, spaceAfter=0, leading=28, fontSize=20, leftIndent=0)
+    subtitle_style = ParagraphStyle("Subtitle", parent=styles["Normal"], textColor=colors.HexColor("#555555"),
+                                     alignment=1, spaceBefore=6, spaceAfter=14, fontSize=10)
     h2_style = ParagraphStyle("H2", parent=styles["Heading2"], textColor=NEGRO,
                                spaceBefore=14, spaceAfter=6, fontSize=14)
     body_style = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=10.5, leading=15)
 
     elements = []
-    elements.append(Paragraph("WILLY'S PIZZA &mdash; Reporte Semanal de Ventas", title_style))
-    elements.append(Spacer(1, 12))
-
-    banner_img.seek(0)
-    elements.append(Image(banner_img, width=17 * cm, height=6.6 * cm))
-    elements.append(Spacer(1, 14))
+    elements.append(Paragraph("WILLY'S PIZZA &mdash; Reporte de Ventas", title_style))
+    elements.append(Paragraph(f"Periodo analizado: {label_a} &nbsp;|&nbsp; Comparado contra: {label_b}", subtitle_style))
 
     sections = parse_sections(report_text)
     for titulo, contenido in sections.items():
@@ -206,20 +259,25 @@ def build_pdf(rows, stats, report_text, banner_img, chart_img):
                 elements.append(Paragraph(parrafo, body_style))
                 elements.append(Spacer(1, 4))
 
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph("Grafica de ventas (ultimos 6 meses)", h2_style))
-    chart_img.seek(0)
-    elements.append(Image(chart_img, width=16 * cm, height=9.3 * cm))
+    elements.append(PageBreak())
+    elements.append(Paragraph(f"Tendencia diaria - {label_a}", h2_style))
+    trend_img.seek(0)
+    elements.append(Image(trend_img, width=17 * cm, height=9.3 * cm))
+
+    elements.append(Spacer(1, 16))
+    elements.append(Paragraph(f"Comparacion: {label_a} vs {label_b}", h2_style))
+    comparison_img.seek(0)
+    elements.append(Image(comparison_img, width=17 * cm, height=9.3 * cm))
 
     elements.append(PageBreak())
-    elements.append(Paragraph("Tabla resumen mensual", h2_style))
+    elements.append(Paragraph(f"Tabla diaria - {label_a}", h2_style))
 
-    table_data = [["Mes", "Pedidos", "Monto (UYU)", "% Crec. Monto", "% Crec. Pedidos"]]
-    for r in rows:
+    table_data = [["Dia", "Pedidos", "Monto (UYU)", "% Crec. Monto", "% Crec. Pedidos"]]
+    for r in rows_a:
         crec_monto = f"{r['amount_growth_percent']:.1f}%" if r["amount_growth_percent"] is not None else "-"
         crec_pedidos = f"{r['order_count_growth_percent']:.1f}%" if r["order_count_growth_percent"] is not None else "-"
         table_data.append([
-            r["mes_label"],
+            r["dia_label"],
             str(r["order_count"]),
             f"{r['total_amount']:,.2f}",
             crec_monto,
@@ -242,10 +300,30 @@ def build_pdf(rows, stats, report_text, banner_img, chart_img):
     return buf
 
 
-def generate_report_pdf(file_stream):
+def generate_report_pdf(file_stream, fecha_inicio_a, fecha_fin_a, fecha_inicio_b=None, fecha_fin_b=None):
     rows = parse_csv(file_stream)
-    stats = compute_stats(rows)
-    report_text = call_llm(rows, stats)
-    banner_img = fetch_banner_image()
-    chart_img = fetch_chart_image(rows)
-    return build_pdf(rows, stats, report_text, banner_img, chart_img)
+
+    rows_a = filter_period(rows, fecha_inicio_a, fecha_fin_a)
+    if not rows_a:
+        raise ValueError("No hay datos de ventas en el periodo a analizar seleccionado.")
+
+    if fecha_inicio_b is None or fecha_fin_b is None:
+        fecha_inicio_b, fecha_fin_b = default_comparison_period(fecha_inicio_a, fecha_fin_a)
+    rows_b = filter_period(rows, fecha_inicio_b, fecha_fin_b)
+
+    stats_a = compute_period_stats(rows_a)
+    stats_b = compute_period_stats(rows_b)
+
+    label_a = f"{fecha_inicio_a.strftime('%d/%m/%Y')} - {fecha_fin_a.strftime('%d/%m/%Y')}"
+    label_b = f"{fecha_inicio_b.strftime('%d/%m/%Y')} - {fecha_fin_b.strftime('%d/%m/%Y')}"
+
+    comparacion = compute_comparison(stats_a, stats_b) if stats_b else {"crecimiento_monto": None, "crecimiento_pedidos": None}
+    stats_b_safe = stats_b or {"desde": "-", "hasta": "-", "dias_con_ventas": 0, "total_pedidos": 0, "total_monto": 0,
+                                "promedio_diario_monto": 0, "promedio_diario_pedidos": 0,
+                                "mejor_dia": "-", "mejor_dia_monto": 0, "peor_dia": "-", "peor_dia_monto": 0}
+
+    report_text = call_llm(rows_a, stats_a, label_a, rows_b, stats_b_safe, label_b, comparacion)
+    trend_img = fetch_trend_chart(rows_a, label_a)
+    comparison_img = fetch_comparison_chart(stats_a, label_a, stats_b_safe, label_b)
+
+    return build_pdf(rows_a, stats_a, label_a, stats_b_safe, label_b, report_text, trend_img, comparison_img)

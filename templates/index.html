@@ -78,6 +78,38 @@
       font-size: 14px;
       color: #555;
     }
+    .periodo {
+      margin-bottom: 18px;
+    }
+    .periodo h3 {
+      font-size: 13px;
+      color: #000;
+      margin: 0 0 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .periodo .fechas {
+      display: flex;
+      gap: 10px;
+    }
+    .periodo .fechas label {
+      flex: 1;
+      font-size: 11px;
+      color: #555;
+    }
+    .periodo input[type="date"] {
+      width: 100%;
+      padding: 6px;
+      margin-top: 2px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+    .hint {
+      font-size: 11px;
+      color: #888;
+      margin: -4px 0 14px;
+    }
   </style>
 </head>
 <body>
@@ -101,6 +133,32 @@
           <br /><br />
           <input type="file" name="csv_file" accept=".csv" required />
         </div>
+
+        <div class="periodo">
+          <h3>Periodo a analizar</h3>
+          <div class="fechas">
+            <label>Desde
+              <input type="date" name="fecha_inicio_a" required />
+            </label>
+            <label>Hasta
+              <input type="date" name="fecha_fin_a" required />
+            </label>
+          </div>
+        </div>
+
+        <div class="periodo">
+          <h3>Periodo a comparar (opcional)</h3>
+          <div class="fechas">
+            <label>Desde
+              <input type="date" name="fecha_inicio_b" />
+            </label>
+            <label>Hasta
+              <input type="date" name="fecha_fin_b" />
+            </label>
+          </div>
+          <div class="hint">Si lo dejas vacio, se compara automaticamente contra el periodo inmediatamente anterior de igual duracion.</div>
+        </div>
+
         <button type="submit">Generar reporte PDF</button>
       </form>
       <div class="loading" id="loadingMsg">
