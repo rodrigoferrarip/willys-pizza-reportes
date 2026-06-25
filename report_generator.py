@@ -1,9 +1,10 @@
 import io
 import os
+import csv
 import json
 import urllib.parse
+from datetime import datetime
 
-import pandas as pd
 import requests
 import google.generativeai as genai
 
@@ -21,44 +22,78 @@ AMARILLO = colors.HexColor("#FFC700")
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
 
+def _to_float(value):
+    if value is None:
+        return None
+    value = value.strip().replace(",", "")
+    if value == "":
+        return None
+    return float(value)
+
+
 def parse_csv(file_stream):
-    df = pd.read_csv(file_stream, thousands=",")
-    df = df.dropna(how="all")
-    df = df.dropna(subset=["created_at_gmt3", "total_amount"])
-    df["created_at_gmt3"] = pd.to_datetime(df["created_at_gmt3"], format="mixed")
-    df = df.sort_values("created_at_gmt3").reset_index(drop=True)
-    df["mes_label"] = df["created_at_gmt3"].dt.strftime("%b %Y")
-    return df
+    text = file_stream.read()
+    if isinstance(text, bytes):
+        text = text.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+
+    rows = []
+    for raw in reader:
+        if not raw.get("created_at_gmt3") or not raw.get("total_amount"):
+            continue
+        fecha = datetime.strptime(raw["created_at_gmt3"].strip(), "%B %d, %Y, %I:%M %p")
+        rows.append({
+            "fecha": fecha,
+            "mes_label": fecha.strftime("%b %Y"),
+            "order_count": int(float(raw["order_count"])),
+            "total_amount": _to_float(raw["total_amount"]),
+            "amount_growth_percent": _to_float(raw.get("amount_growth_percent")),
+            "order_count_growth_percent": _to_float(raw.get("order_count_growth_percent")),
+        })
+
+    rows.sort(key=lambda r: r["fecha"])
+    return rows
 
 
-def compute_stats(df):
-    best_idx = df["total_amount"].idxmax()
-    worst_idx = df["total_amount"].idxmin()
+def compute_stats(rows):
+    best = max(rows, key=lambda r: r["total_amount"])
+    worst = min(rows, key=lambda r: r["total_amount"])
+    total_monto = sum(r["total_amount"] for r in rows)
+    total_pedidos = sum(r["order_count"] for r in rows)
+    n = len(rows)
+
     return {
-        "periodo_inicio": df["mes_label"].iloc[0],
-        "periodo_fin": df["mes_label"].iloc[-1],
-        "total_pedidos": int(df["order_count"].sum()),
-        "total_monto": float(df["total_amount"].sum()),
-        "promedio_monto": float(df["total_amount"].mean()),
-        "promedio_pedidos": float(df["order_count"].mean()),
-        "mejor_mes": df["mes_label"].loc[best_idx],
-        "mejor_mes_monto": float(df["total_amount"].loc[best_idx]),
-        "peor_mes": df["mes_label"].loc[worst_idx],
-        "peor_mes_monto": float(df["total_amount"].loc[worst_idx]),
-        "ultimo_mes": df["mes_label"].iloc[-1],
-        "ultimo_mes_monto": float(df["total_amount"].iloc[-1]),
-        "ultimo_crecimiento": df["amount_growth_percent"].iloc[-1] if pd.notna(df["amount_growth_percent"].iloc[-1]) else None,
+        "periodo_inicio": rows[0]["mes_label"],
+        "periodo_fin": rows[-1]["mes_label"],
+        "total_pedidos": total_pedidos,
+        "total_monto": total_monto,
+        "promedio_monto": total_monto / n,
+        "promedio_pedidos": total_pedidos / n,
+        "mejor_mes": best["mes_label"],
+        "mejor_mes_monto": best["total_amount"],
+        "peor_mes": worst["mes_label"],
+        "peor_mes_monto": worst["total_amount"],
+        "ultimo_mes": rows[-1]["mes_label"],
+        "ultimo_mes_monto": rows[-1]["total_amount"],
+        "ultimo_crecimiento": rows[-1]["amount_growth_percent"],
     }
 
 
-def call_gemini(df, stats):
+def call_gemini(rows, stats):
     model = genai.GenerativeModel("gemini-2.0-flash")
-    tabla = df[["mes_label", "order_count", "total_amount", "amount_growth_percent", "order_count_growth_percent"]].to_string(index=False)
+
+    lineas = ["mes | pedidos | monto_total | crecimiento_monto% | crecimiento_pedidos%"]
+    for r in rows:
+        lineas.append(
+            f"{r['mes_label']} | {r['order_count']} | {r['total_amount']:.2f} | "
+            f"{r['amount_growth_percent'] if r['amount_growth_percent'] is not None else 'N/A'} | "
+            f"{r['order_count_growth_percent'] if r['order_count_growth_percent'] is not None else 'N/A'}"
+        )
+    tabla = "\n".join(lineas)
 
     prompt = f"""Eres un analista financiero experto en negocios gastronomicos. A continuacion te paso los datos de ventas mensuales de "Willy's Pizza", una pizzeria, extraidos de su plataforma de pedidos online.
 
-Datos (mes | cantidad de pedidos | monto total en UYU | % crecimiento de monto vs mes anterior | % crecimiento de pedidos vs mes anterior):
-
+Datos:
 {tabla}
 
 Estadisticas ya calculadas para que las uses como referencia:
@@ -91,10 +126,10 @@ def fetch_banner_image():
     return io.BytesIO(resp.content)
 
 
-def fetch_chart_image(df):
-    last6 = df.tail(6)
-    labels = list(last6["mes_label"])
-    data = [round(v, 2) for v in last6["total_amount"]]
+def fetch_chart_image(rows):
+    last6 = rows[-6:]
+    labels = [r["mes_label"] for r in last6]
+    data = [round(r["total_amount"], 2) for r in last6]
     chart_config = {
         "type": "bar",
         "data": {
@@ -138,15 +173,15 @@ def parse_sections(report_text):
     return sections
 
 
-def build_pdf(df, stats, report_text, banner_img, chart_img):
+def build_pdf(rows, stats, report_text, banner_img, chart_img):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle("TitleY", parent=styles["Title"], textColor=AMARILLO, backColor=NEGRO,
                                   alignment=1, spaceAfter=0, leading=28, fontSize=22, leftIndent=0)
-    h2_style = ParagraphStyle("H2", parent=styles["Heading2"], textColor=NEGRO, borderColor=AMARILLO,
-                               borderWidth=0, spaceBefore=14, spaceAfter=6, fontSize=14)
+    h2_style = ParagraphStyle("H2", parent=styles["Heading2"], textColor=NEGRO,
+                               spaceBefore=14, spaceAfter=6, fontSize=14)
     body_style = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=10.5, leading=15)
 
     elements = []
@@ -175,13 +210,13 @@ def build_pdf(df, stats, report_text, banner_img, chart_img):
     elements.append(Paragraph("Tabla resumen mensual", h2_style))
 
     table_data = [["Mes", "Pedidos", "Monto (UYU)", "% Crec. Monto", "% Crec. Pedidos"]]
-    for _, row in df.iterrows():
-        crec_monto = f"{row['amount_growth_percent']:.1f}%" if pd.notna(row['amount_growth_percent']) else "-"
-        crec_pedidos = f"{row['order_count_growth_percent']:.1f}%" if pd.notna(row['order_count_growth_percent']) else "-"
+    for r in rows:
+        crec_monto = f"{r['amount_growth_percent']:.1f}%" if r["amount_growth_percent"] is not None else "-"
+        crec_pedidos = f"{r['order_count_growth_percent']:.1f}%" if r["order_count_growth_percent"] is not None else "-"
         table_data.append([
-            row["mes_label"],
-            str(int(row["order_count"])),
-            f"{row['total_amount']:,.2f}",
+            r["mes_label"],
+            str(r["order_count"]),
+            f"{r['total_amount']:,.2f}",
             crec_monto,
             crec_pedidos,
         ])
@@ -203,9 +238,9 @@ def build_pdf(df, stats, report_text, banner_img, chart_img):
 
 
 def generate_report_pdf(file_stream):
-    df = parse_csv(file_stream)
-    stats = compute_stats(df)
-    report_text = call_gemini(df, stats)
+    rows = parse_csv(file_stream)
+    stats = compute_stats(rows)
+    report_text = call_gemini(rows, stats)
     banner_img = fetch_banner_image()
-    chart_img = fetch_chart_image(df)
-    return build_pdf(df, stats, report_text, banner_img, chart_img)
+    chart_img = fetch_chart_image(rows)
+    return build_pdf(rows, stats, report_text, banner_img, chart_img)
