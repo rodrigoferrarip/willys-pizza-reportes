@@ -131,7 +131,13 @@
         <div class="dropzone">
           Subi el CSV exportado de letsreorder.com
           <br /><br />
-          <input type="file" name="csv_file" accept=".csv" required />
+          <input type="file" name="csv_file" accept=".csv" />
+          {% if last_csv %}
+            <div class="hint" style="margin-top:10px;">
+              Si no subis uno nuevo, se usa el ultimo cargado:<br />
+              <strong>{{ last_csv.filename }}</strong> ({{ last_csv.uploaded_at }})
+            </div>
+          {% endif %}
         </div>
 
         <div class="periodo">
