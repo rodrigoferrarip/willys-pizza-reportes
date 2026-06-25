@@ -153,33 +153,36 @@ Devolve UNICAMENTE un JSON valido (sin texto adicional, sin markdown) con esta f
     return json.loads(response.choices[0].message.content)
 
 
+def _resumen_breve_fallback(insights):
+    partes = [
+        insights.get("resumen", ""),
+        insights.get("comparacion", ""),
+        insights.get("recomendacion", ""),
+    ]
+    return " ".join(p.strip() for p in partes if p.strip())
+
+
 def agente_redactor_hf(insights, label_a, label_b):
-    """Agente 2 (Hugging Face Inference API): toma los insights del analista y redacta el reporte final en espanol."""
-    prompt = f"""Eres un redactor ejecutivo. A partir de estos insights ya analizados sobre las ventas de "Willy's Pizza" (periodo analizado: {label_a}, comparado contra: {label_b}), escribi un reporte ejecutivo en espanol.
+    """Agente 2 (Hugging Face Inference API): toma los insights del analista y redacta un resumen ejecutivo breve en espanol."""
+    prompt = f"""Eres un redactor ejecutivo. A partir de estos insights ya analizados sobre las ventas de "Willy's Pizza" (periodo analizado: {label_a}, comparado contra: {label_b}), escribi un RESUMEN EJECUTIVO BREVE en espanol de 4 a 6 oraciones, en un solo parrafo, sin titulos, sin markdown, sin listas. Debe mencionar el desempeno del periodo, la comparacion contra el periodo anterior, y cerrar con la recomendacion principal.
 
 Insights:
-{json.dumps(insights, ensure_ascii=False, indent=2)}
+{json.dumps(insights, ensure_ascii=False, indent=2)}"""
 
-Usa EXACTAMENTE estas secciones, con titulos precedidos por ##:
-
-## Resumen del periodo
-## Comparacion contra el periodo anterior
-## Mejor y peor dia
-## Tendencia dentro del periodo
-## Recomendacion
-
-Tono profesional pero cercano. Texto corrido, sin tablas markdown, sin repetir los titulos dentro del texto."""
-
-    hf_client = OpenAI(
-        api_key=os.environ["HF_API_TOKEN"],
-        base_url="https://router.huggingface.co/v1",
-    )
-    response = hf_client.chat.completions.create(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1500,
-    )
-    return response.choices[0].message.content
+    try:
+        hf_client = OpenAI(
+            api_key=os.environ["HF_API_TOKEN"],
+            base_url="https://router.huggingface.co/v1",
+        )
+        response = hf_client.chat.completions.create(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+        )
+        texto = (response.choices[0].message.content or "").strip()
+        return texto if texto else _resumen_breve_fallback(insights)
+    except Exception:
+        return _resumen_breve_fallback(insights)
 
 
 def fetch_trend_chart(rows_a, label_a):
@@ -247,6 +250,56 @@ def fetch_comparison_chart(stats_a, label_a, stats_b, label_b):
     return _quickchart(chart_config)
 
 
+def fetch_ticket_chart(stats_a, label_a, stats_b, label_b):
+    chart_config = {
+        "type": "bar",
+        "data": {
+            "labels": [label_a, label_b],
+            "datasets": [{
+                "label": "Ticket promedio (UYU)",
+                "data": [stats_a["ticket_promedio"], stats_b["ticket_promedio"]],
+                "backgroundColor": ["#FFC700", "#000000"],
+                "borderColor": "#000000",
+                "borderWidth": 2,
+            }],
+        },
+        "options": {
+            "plugins": {"legend": {"display": False}},
+            "scales": {
+                "x": {"ticks": {"color": "#000000"}},
+                "y": {"ticks": {"color": "#000000"}},
+            },
+        },
+    }
+    return _quickchart(chart_config)
+
+
+def fetch_weekday_chart(stats_a, label_a):
+    orden = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+    data = [stats_a["monto_por_dia_semana"].get(d, 0) for d in orden]
+    chart_config = {
+        "type": "bar",
+        "data": {
+            "labels": orden,
+            "datasets": [{
+                "label": f"Monto por dia de la semana - {label_a}",
+                "data": data,
+                "backgroundColor": "#FFC700",
+                "borderColor": "#000000",
+                "borderWidth": 2,
+            }],
+        },
+        "options": {
+            "plugins": {"legend": {"labels": {"color": "#000000"}}},
+            "scales": {
+                "x": {"ticks": {"color": "#000000"}},
+                "y": {"ticks": {"color": "#000000"}},
+            },
+        },
+    }
+    return _quickchart(chart_config)
+
+
 def _quickchart(chart_config):
     url = "https://quickchart.io/chart"
     resp = requests.post(
@@ -265,24 +318,8 @@ def _quickchart(chart_config):
     return io.BytesIO(resp.content)
 
 
-def parse_sections(report_text):
-    sections = {}
-    current = None
-    buf = []
-    for line in report_text.splitlines():
-        if line.strip().startswith("##"):
-            if current:
-                sections[current] = "\n".join(buf).strip()
-            current = line.strip().lstrip("#").strip()
-            buf = []
-        else:
-            buf.append(line)
-    if current:
-        sections[current] = "\n".join(buf).strip()
-    return sections
-
-
-def build_pdf(rows_a, stats_a, label_a, stats_b, label_b, report_text, trend_img, comparison_img):
+def build_pdf(rows_a, stats_a, label_a, stats_b, label_b, resumen_breve,
+              trend_img, ticket_img, comparison_img, weekday_img):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
     styles = getSampleStyleSheet()
@@ -294,29 +331,61 @@ def build_pdf(rows_a, stats_a, label_a, stats_b, label_b, report_text, trend_img
     h2_style = ParagraphStyle("H2", parent=styles["Heading2"], textColor=NEGRO,
                                spaceBefore=14, spaceAfter=6, fontSize=14)
     body_style = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=10.5, leading=15)
+    metric_label_style = ParagraphStyle("MetricLabel", parent=styles["Normal"], fontSize=9,
+                                         textColor=colors.HexColor("#555555"), alignment=1)
+    metric_value_style = ParagraphStyle("MetricValue", parent=styles["Normal"], fontSize=15,
+                                         textColor=NEGRO, alignment=1, spaceBefore=2, fontName="Helvetica-Bold")
 
     elements = []
     elements.append(Paragraph("WILLY'S PIZZA &mdash; Reporte de Ventas", title_style))
     elements.append(Paragraph(f"Periodo analizado: {label_a} &nbsp;|&nbsp; Comparado contra: {label_b}", subtitle_style))
 
-    sections = parse_sections(report_text)
-    for titulo, contenido in sections.items():
-        elements.append(Paragraph(titulo, h2_style))
-        for parrafo in contenido.split("\n\n"):
-            parrafo = parrafo.strip().replace("\n", " ")
-            if parrafo:
-                elements.append(Paragraph(parrafo, body_style))
-                elements.append(Spacer(1, 4))
+    elements.append(Paragraph("Resumen ejecutivo", h2_style))
+    elements.append(Paragraph(resumen_breve, body_style))
+    elements.append(Spacer(1, 10))
 
-    elements.append(PageBreak())
-    elements.append(Paragraph(f"Tendencia diaria - {label_a}", h2_style))
+    metric_data = [[
+        Paragraph("Monto total", metric_label_style),
+        Paragraph("Pedidos totales", metric_label_style),
+        Paragraph("Ticket promedio", metric_label_style),
+    ], [
+        Paragraph(f"$ {stats_a['total_monto']:,.0f}", metric_value_style),
+        Paragraph(str(stats_a["total_pedidos"]), metric_value_style),
+        Paragraph(f"$ {stats_a['ticket_promedio']:,.0f}", metric_value_style),
+    ]]
+    metric_tbl = Table(metric_data, colWidths=[5.6 * cm, 5.6 * cm, 5.6 * cm])
+    metric_tbl.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#dddddd")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f7f7f7")),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(metric_tbl)
+    elements.append(Spacer(1, 16))
+
+    elements.append(Paragraph(f"Ventas por dia - {label_a}", h2_style))
     trend_img.seek(0)
     elements.append(Image(trend_img, width=17 * cm, height=9.3 * cm))
+
+    elements.append(PageBreak())
+    elements.append(Paragraph("Ticket promedio: periodo analizado vs comparativo", h2_style))
+    ticket_img.seek(0)
+    elements.append(Image(ticket_img, width=14 * cm, height=8.5 * cm))
 
     elements.append(Spacer(1, 16))
     elements.append(Paragraph(f"Comparacion: {label_a} vs {label_b}", h2_style))
     comparison_img.seek(0)
     elements.append(Image(comparison_img, width=17 * cm, height=9.3 * cm))
+
+    elements.append(PageBreak())
+    elements.append(Paragraph(f"Ventas por dia de la semana - {label_a}", h2_style))
+    elements.append(Paragraph(
+        f"El dia de la semana con mas ventas en este periodo es <b>{stats_a['dia_semana_mas_fuerte']}</b>.",
+        body_style))
+    elements.append(Spacer(1, 6))
+    weekday_img.seek(0)
+    elements.append(Image(weekday_img, width=17 * cm, height=9.3 * cm))
 
     elements.append(PageBreak())
     elements.append(Paragraph(f"Tabla diaria - {label_a}", h2_style))
@@ -367,13 +436,20 @@ def generate_report_pdf(file_stream, fecha_inicio_a, fecha_fin_a, fecha_inicio_b
     label_b = f"{fecha_inicio_b.strftime('%d/%m/%Y')} - {fecha_fin_b.strftime('%d/%m/%Y')}"
 
     comparacion = compute_comparison(stats_a, stats_b) if stats_b else {"crecimiento_monto": None, "crecimiento_pedidos": None}
-    stats_b_safe = stats_b or {"desde": "-", "hasta": "-", "dias_con_ventas": 0, "total_pedidos": 0, "total_monto": 0,
-                                "promedio_diario_monto": 0, "promedio_diario_pedidos": 0,
-                                "mejor_dia": "-", "mejor_dia_monto": 0, "peor_dia": "-", "peor_dia_monto": 0}
+    stats_b_safe = stats_b or {
+        "desde": "-", "hasta": "-", "dias_con_ventas": 0, "total_pedidos": 0, "total_monto": 0,
+        "ticket_promedio": 0, "promedio_diario_monto": 0, "promedio_diario_pedidos": 0,
+        "mejor_dia": "-", "mejor_dia_monto": 0, "peor_dia": "-", "peor_dia_monto": 0,
+        "dia_semana_mas_fuerte": "-", "monto_por_dia_semana": {},
+    }
 
     insights = agente_analista_groq(rows_a, stats_a, label_a, rows_b, stats_b_safe, label_b, comparacion)
-    report_text = agente_redactor_hf(insights, label_a, label_b)
-    trend_img = fetch_trend_chart(rows_a, label_a)
-    comparison_img = fetch_comparison_chart(stats_a, label_a, stats_b_safe, label_b)
+    resumen_breve = agente_redactor_hf(insights, label_a, label_b)
 
-    return build_pdf(rows_a, stats_a, label_a, stats_b_safe, label_b, report_text, trend_img, comparison_img)
+    trend_img = fetch_trend_chart(rows_a, label_a)
+    ticket_img = fetch_ticket_chart(stats_a, label_a, stats_b_safe, label_b)
+    comparison_img = fetch_comparison_chart(stats_a, label_a, stats_b_safe, label_b)
+    weekday_img = fetch_weekday_chart(stats_a, label_a)
+
+    return build_pdf(rows_a, stats_a, label_a, stats_b_safe, label_b, resumen_breve,
+                      trend_img, ticket_img, comparison_img, weekday_img)
