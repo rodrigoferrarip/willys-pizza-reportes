@@ -6,7 +6,7 @@ import urllib.parse
 from datetime import datetime
 
 import requests
-import google.generativeai as genai
+from openai import OpenAI
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -19,7 +19,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 NEGRO = colors.HexColor("#000000")
 AMARILLO = colors.HexColor("#FFC700")
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+groq_client = OpenAI(
+    api_key=os.environ["GROQ_API_KEY"],
+    base_url="https://api.groq.com/openai/v1",
+)
 
 
 def _to_float(value):
@@ -79,9 +82,7 @@ def compute_stats(rows):
     }
 
 
-def call_gemini(rows, stats):
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
+def call_llm(rows, stats):
     lineas = ["mes | pedidos | monto_total | crecimiento_monto% | crecimiento_pedidos%"]
     for r in rows:
         lineas.append(
@@ -109,8 +110,12 @@ Con estos datos, redacta un reporte ejecutivo en espanol, claro y directo, con E
 
 Tono profesional pero cercano, sin tecnicismos innecesarios. No uses tablas markdown, solo texto corrido bajo cada titulo. No repitas los titulos de seccion dentro del texto."""
 
-    response = model.generate_content(prompt)
-    return response.text
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1500,
+    )
+    return response.choices[0].message.content
 
 
 def fetch_banner_image():
@@ -240,7 +245,7 @@ def build_pdf(rows, stats, report_text, banner_img, chart_img):
 def generate_report_pdf(file_stream):
     rows = parse_csv(file_stream)
     stats = compute_stats(rows)
-    report_text = call_gemini(rows, stats)
+    report_text = call_llm(rows, stats)
     banner_img = fetch_banner_image()
     chart_img = fetch_chart_image(rows)
     return build_pdf(rows, stats, report_text, banner_img, chart_img)
