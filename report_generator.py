@@ -80,7 +80,7 @@ def compute_stats(rows):
 
 
 def call_gemini(rows, stats):
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
     lineas = ["mes | pedidos | monto_total | crecimiento_monto% | crecimiento_pedidos%"]
     for r in rows:
