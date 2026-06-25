@@ -209,10 +209,17 @@ def _quickchart(chart_config):
     url = "https://quickchart.io/chart"
     resp = requests.post(
         url,
-        json={"chart": chart_config, "width": 700, "height": 380, "backgroundColor": "white"},
+        json={
+            "chart": chart_config,
+            "width": 700,
+            "height": 380,
+            "backgroundColor": "white",
+            "version": "3",
+        },
         timeout=60,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"QuickChart error ({resp.status_code}): {resp.text[:300]}")
     return io.BytesIO(resp.content)
 
 
