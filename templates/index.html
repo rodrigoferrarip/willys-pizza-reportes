@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Willy's Pizza - Reportes Automaticos</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f5f5f5;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      width: 420px;
+      overflow: hidden;
+    }
+    .header {
+      background-color: #000000;
+      padding: 28px;
+      text-align: center;
+    }
+    .header h1 {
+      color: #FFC700;
+      margin: 0;
+      font-size: 26px;
+    }
+    .header p {
+      color: #ffffff;
+      margin: 6px 0 0;
+      font-size: 14px;
+    }
+    .body {
+      padding: 28px;
+    }
+    .dropzone {
+      border: 2px dashed #FFC700;
+      border-radius: 8px;
+      padding: 30px;
+      text-align: center;
+      color: #555;
+      margin-bottom: 20px;
+    }
+    input[type="file"] {
+      width: 100%;
+    }
+    button {
+      width: 100%;
+      background-color: #000000;
+      color: #FFC700;
+      border: none;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: bold;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #222222;
+    }
+    .flash {
+      background-color: #ffe5e5;
+      color: #b00000;
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+      font-size: 13px;
+    }
+    .loading {
+      display: none;
+      text-align: center;
+      margin-top: 16px;
+      font-size: 14px;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <h1>🍕 Willy's Pizza</h1>
+      <p>Generador automatico de reportes de ventas</p>
+    </div>
+    <div class="body">
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          {% for m in messages %}
+            <div class="flash">{{ m }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <form id="reportForm" action="/generar" method="post" enctype="multipart/form-data">
+        <div class="dropzone">
+          Subi el CSV exportado de letsreorder.com
+          <br /><br />
+          <input type="file" name="csv_file" accept=".csv" required />
+        </div>
+        <button type="submit">Generar reporte PDF</button>
+      </form>
+      <div class="loading" id="loadingMsg">
+        Analizando ventas, generando grafico e imagen de marca... esto puede tardar 20-40 segundos.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("reportForm").addEventListener("submit", function () {
+      document.getElementById("loadingMsg").style.display = "block";
+    });
+  </script>
+</body>
+</html>
