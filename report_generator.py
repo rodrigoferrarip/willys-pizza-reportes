@@ -68,6 +68,9 @@ def default_comparison_period(start, end):
     return comp_start, comp_end
 
 
+DIAS_SEMANA = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
+
+
 def compute_period_stats(rows):
     if not rows:
         return None
@@ -76,18 +79,30 @@ def compute_period_stats(rows):
     total_monto = sum(r["total_amount"] for r in rows)
     total_pedidos = sum(r["order_count"] for r in rows)
     n = len(rows)
+
+    monto_por_dia_semana = {}
+    pedidos_por_dia_semana = {}
+    for r in rows:
+        dia_semana = DIAS_SEMANA[r["fecha"].weekday()]
+        monto_por_dia_semana[dia_semana] = monto_por_dia_semana.get(dia_semana, 0) + r["total_amount"]
+        pedidos_por_dia_semana[dia_semana] = pedidos_por_dia_semana.get(dia_semana, 0) + r["order_count"]
+    dia_semana_mas_fuerte = max(monto_por_dia_semana, key=monto_por_dia_semana.get)
+
     return {
         "desde": rows[0]["dia_label"],
         "hasta": rows[-1]["dia_label"],
         "dias_con_ventas": n,
         "total_pedidos": total_pedidos,
         "total_monto": round(total_monto, 2),
+        "ticket_promedio": round(total_monto / total_pedidos, 2) if total_pedidos else 0,
         "promedio_diario_monto": round(total_monto / n, 2),
         "promedio_diario_pedidos": round(total_pedidos / n, 2),
         "mejor_dia": best["dia_label"],
         "mejor_dia_monto": best["total_amount"],
         "peor_dia": worst["dia_label"],
         "peor_dia_monto": worst["total_amount"],
+        "dia_semana_mas_fuerte": dia_semana_mas_fuerte,
+        "monto_por_dia_semana": {k: round(v, 2) for k, v in monto_por_dia_semana.items()},
     }
 
 
@@ -102,27 +117,50 @@ def compute_comparison(stats_a, stats_b):
     }
 
 
-def call_llm(rows_a, stats_a, label_a, rows_b, stats_b, label_b, comparacion):
+def agente_analista_groq(rows_a, stats_a, label_a, rows_b, stats_b, label_b, comparacion):
+    """Agente 1 (Groq / Llama 3.3): analiza los datos crudos y devuelve insights estructurados en JSON."""
     tabla_a = "\n".join(
         f"{r['dia_label']} | pedidos={r['order_count']} | monto={r['total_amount']:.2f}" for r in rows_a
     )
 
-    prompt = f"""Eres un analista financiero experto en negocios gastronomicos. Willy's Pizza es una pizzeria que vende online. Te paso datos de ventas DIARIAS de dos periodos para que los compares.
+    prompt = f"""Eres un analista de datos para Willy's Pizza, una pizzeria que vende online. Te paso ventas DIARIAS de dos periodos.
 
-PERIODO A ANALIZAR ({label_a}):
+PERIODO A ({label_a}):
 {tabla_a}
+Estadisticas A: {json.dumps(stats_a, ensure_ascii=False)}
 
-Estadisticas del Periodo A:
-{json.dumps(stats_a, ensure_ascii=False, indent=2)}
+PERIODO B / comparacion ({label_b}):
+Estadisticas B: {json.dumps(stats_b, ensure_ascii=False)}
 
-PERIODO DE COMPARACION ({label_b}):
-Estadisticas del Periodo B:
-{json.dumps(stats_b, ensure_ascii=False, indent=2)}
+Comparacion A vs B: {json.dumps(comparacion, ensure_ascii=False)}
 
-Comparacion calculada (Periodo A vs Periodo B):
-{json.dumps(comparacion, ensure_ascii=False, indent=2)}
+Devolve UNICAMENTE un JSON valido (sin texto adicional, sin markdown) con esta forma exacta:
+{{
+  "resumen": "string con el resumen del periodo A: total pedidos, total monto, ticket promedio",
+  "comparacion": "string explicando si A creció o cayó vs B, con los porcentajes",
+  "mejor_peor_dia": "string identificando mejor y peor dia de A con sus montos",
+  "dia_semana_destacado": "string sobre que dia de la semana concentra mas ventas y por que podria ser relevante",
+  "anomalias": "string con cualquier dato atipico relevante (picos, caidas fuertes)",
+  "recomendacion": "string con una recomendacion concreta y accionable, maximo 3 lineas"
+}}"""
 
-Redacta un reporte ejecutivo en espanol, claro y directo, enfocado en el Periodo A y usando el Periodo B como referencia de comparacion. Usa EXACTAMENTE estas secciones, con estos titulos precedidos por ##:
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1200,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+def agente_redactor_hf(insights, label_a, label_b):
+    """Agente 2 (Hugging Face Inference API): toma los insights del analista y redacta el reporte final en espanol."""
+    prompt = f"""Eres un redactor ejecutivo. A partir de estos insights ya analizados sobre las ventas de "Willy's Pizza" (periodo analizado: {label_a}, comparado contra: {label_b}), escribi un reporte ejecutivo en espanol.
+
+Insights:
+{json.dumps(insights, ensure_ascii=False, indent=2)}
+
+Usa EXACTAMENTE estas secciones, con titulos precedidos por ##:
 
 ## Resumen del periodo
 ## Comparacion contra el periodo anterior
@@ -130,10 +168,14 @@ Redacta un reporte ejecutivo en espanol, claro y directo, enfocado en el Periodo
 ## Tendencia dentro del periodo
 ## Recomendacion
 
-Tono profesional pero cercano, sin tecnicismos innecesarios. No uses tablas markdown, solo texto corrido bajo cada titulo. No repitas los titulos de seccion dentro del texto. Se especifico citando los numeros relevantes."""
+Tono profesional pero cercano. Texto corrido, sin tablas markdown, sin repetir los titulos dentro del texto."""
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+    hf_client = OpenAI(
+        api_key=os.environ["HF_API_TOKEN"],
+        base_url="https://router.huggingface.co/v1",
+    )
+    response = hf_client.chat.completions.create(
+        model="meta-llama/Llama-3.1-8B-Instruct",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=1500,
     )
@@ -329,7 +371,8 @@ def generate_report_pdf(file_stream, fecha_inicio_a, fecha_fin_a, fecha_inicio_b
                                 "promedio_diario_monto": 0, "promedio_diario_pedidos": 0,
                                 "mejor_dia": "-", "mejor_dia_monto": 0, "peor_dia": "-", "peor_dia_monto": 0}
 
-    report_text = call_llm(rows_a, stats_a, label_a, rows_b, stats_b_safe, label_b, comparacion)
+    insights = agente_analista_groq(rows_a, stats_a, label_a, rows_b, stats_b_safe, label_b, comparacion)
+    report_text = agente_redactor_hf(insights, label_a, label_b)
     trend_img = fetch_trend_chart(rows_a, label_a)
     comparison_img = fetch_comparison_chart(stats_a, label_a, stats_b_safe, label_b)
 
